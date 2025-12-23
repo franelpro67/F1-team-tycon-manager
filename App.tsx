@@ -7,7 +7,7 @@ import Factory from './components/Factory';
 import Engineering from './components/Engineering';
 import Sponsors from './components/Sponsors';
 import RaceSimulation from './components/RaceSimulation';
-import { GameState, TeamState, RaceResult } from './types';
+import { GameState, TeamState, RaceResult, Sponsor } from './types';
 import { INITIAL_FUNDS, AVAILABLE_SPONSORS } from './constants';
 import { Users, User, Globe, Copy, Check, Loader2, ArrowLeft } from 'lucide-react';
 import * as OnlineService from './services/onlineService';
@@ -46,21 +46,23 @@ const App: React.FC = () => {
     };
   });
 
-  // Efecto de Sincronización Online
+  useEffect(() => {
+    localStorage.setItem('f1_tycoon_game_v4', JSON.stringify(gameState));
+  }, [gameState]);
+
+  // Sincronización Online
   useEffect(() => {
     if (gameState.mode !== 'online' || !gameState.roomCode) return;
 
     const interval = setInterval(async () => {
       const remoteState = await OnlineService.fetchGameState(gameState.roomCode!);
       if (remoteState && remoteState.lastUpdateBy !== (gameState.isHost ? 'host' : 'guest')) {
-        // Solo actualizamos si el cambio viene del otro jugador
         setGameState(prev => ({
           ...prev,
           teams: remoteState.teams,
           currentRaceIndex: remoteState.currentRaceIndex,
           seasonHistory: remoteState.seasonHistory,
           currentPlayerIndex: remoteState.currentPlayerIndex,
-          // Si estamos esperando carrera y el host la inició
           ...(remoteState.status === 'racing' && !isRacing ? { status: 'racing' } : {})
         }));
 
@@ -68,7 +70,7 @@ const App: React.FC = () => {
           setIsRacing(true);
         }
       }
-    }, 3000); // Polling cada 3s
+    }, 3000);
 
     return () => clearInterval(interval);
   }, [gameState.mode, gameState.roomCode, gameState.isHost, isRacing]);
@@ -94,13 +96,7 @@ const App: React.FC = () => {
         ? [createInitialTeam(0, "My Team", "red")]
         : [createInitialTeam(0, "Player 1", "red"), createInitialTeam(1, "Player 2", "cyan")];
       
-      const newState: GameState = {
-        mode,
-        teams,
-        currentPlayerIndex: 0,
-        currentRaceIndex: 0,
-        seasonHistory: []
-      };
+      const newState: GameState = { mode, teams, currentPlayerIndex: 0, currentRaceIndex: 0, seasonHistory: [] };
       setGameState(newState);
       setShowModeSelector(false);
     }
@@ -139,7 +135,6 @@ const App: React.FC = () => {
         currentRaceIndex: remote.currentRaceIndex,
         seasonHistory: remote.seasonHistory
       };
-      // Al unirse, el jugador 2 actualiza su nombre de equipo
       newState.teams[1].name = "Guest Team";
       await OnlineService.syncGameState(roomInput.toUpperCase(), { ...newState, lastUpdateBy: 'guest', status: 'ready' });
       setGameState(newState);
@@ -162,9 +157,7 @@ const App: React.FC = () => {
       const nextIndex = (gameState.currentPlayerIndex + 1) % 2;
       const newState = { ...gameState, currentPlayerIndex: nextIndex };
       setGameState(newState);
-      
       if (nextIndex === 0) {
-        // Si vuelve al host, es hora de correr
         await syncToCloud(newState, { status: 'racing' });
         setIsRacing(true);
       } else {
@@ -187,16 +180,36 @@ const App: React.FC = () => {
     setIsRacing(false);
     const updatedState = { ...gameState };
     
-    // Repartir fondos
     updatedState.teams = updatedState.teams.map(team => {
       const teamRes = result.teamResults.find(r => r.teamId === team.id);
       const bestPos = teamRes ? Math.min(teamRes.driver1Position, teamRes.driver2Position) : 20;
+      
       const activeSponsors = AVAILABLE_SPONSORS.filter(s => team.activeSponsorIds.includes(s.id));
       const sponsorPayout = activeSponsors.reduce((sum, s) => bestPos <= s.targetPosition ? sum + s.payoutPerRace : sum, 0);
+      
+      const newReputation = Math.min(100, team.reputation + Math.max(-2, 10 - bestPos));
+      
+      // LOGICA DE LLAMADAS DE SPONSORS
+      const chance = 0.3 + (newReputation / 200); // Entre 30% y 80% de probabilidad
+      const newOffers = [...team.sponsorOffers];
+      
+      if (Math.random() < chance) {
+        // Filtrar patrocinadores que no tiene activos ni ofrecidos
+        const potential = AVAILABLE_SPONSORS.filter(s => 
+          !team.activeSponsorIds.includes(s.id) && 
+          !team.sponsorOffers.some(o => o.id === s.id)
+        );
+        if (potential.length > 0) {
+          const selected = potential[Math.floor(Math.random() * potential.length)];
+          newOffers.push(selected);
+        }
+      }
+
       return {
         ...team,
         funds: team.funds + (21 - bestPos) * 300000 + sponsorPayout + 2000000,
-        reputation: Math.min(100, team.reputation + Math.max(0, 10 - bestPos))
+        reputation: newReputation,
+        sponsorOffers: newOffers
       };
     });
 
@@ -216,48 +229,20 @@ const App: React.FC = () => {
                  (gameState.isHost && gameState.currentPlayerIndex === 0) || 
                  (!gameState.isHost && gameState.currentPlayerIndex === 1);
 
-  if (showModeSelector) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-8 space-y-12">
-        <div className="text-center space-y-4">
-          <h1 className="text-7xl font-f1 font-bold text-red-600 italic tracking-tighter">F1 TYCOON</h1>
-          <p className="text-slate-500 font-bold uppercase tracking-widest animate-pulse">Select Your Management Style</p>
-        </div>
-
-        {onlineMenu === 'none' ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-6xl w-full">
-            <ModeCard onClick={() => handleStartGame('single')} icon={<User size={40} />} title="SOLO CAREER" desc="Classic experience against the AI." />
-            <ModeCard onClick={() => handleStartGame('versus')} icon={<Users size={40} />} title="LOCAL DUEL" desc="Two players on the same device." />
-            <ModeCard onClick={() => setOnlineMenu('host')} icon={<Globe size={40} />} title="ONLINE VERSUS" desc="Race against a friend via room code." accent="border-blue-500 hover:border-blue-400" />
-          </div>
-        ) : (
-          <div className="bg-slate-900 p-10 rounded-3xl border-2 border-slate-800 w-full max-w-md space-y-8 animate-in zoom-in">
-             <button onClick={() => setOnlineMenu('none')} className="text-slate-500 flex items-center gap-2 hover:text-white transition-colors"><ArrowLeft size={16} /> Volver</button>
-             <div className="space-y-4">
-                <h2 className="text-2xl font-f1 font-bold">Online Lobby</h2>
-                <p className="text-slate-400 text-sm">Create a room or enter your friend's code.</p>
-             </div>
-             <div className="space-y-4">
-                <button onClick={handleCreateRoom} disabled={isSyncing} className="w-full py-4 bg-blue-600 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-blue-500 transition-all">
-                  {isSyncing ? <Loader2 className="animate-spin" /> : <Globe size={20} />} CREATE NEW ROOM
-                </button>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">#</div>
-                  <input type="text" value={roomInput} onChange={e => setRoomInput(e.target.value.toUpperCase())} maxLength={6} placeholder="ENTER CODE" className="w-full bg-slate-950 border border-slate-700 py-4 pl-8 rounded-xl font-f1 text-center outline-none focus:border-blue-500 transition-all uppercase" />
-                </div>
-                <button onClick={handleJoinRoom} disabled={isSyncing || !roomInput} className="w-full py-4 bg-slate-800 rounded-xl font-bold border border-slate-700 hover:bg-slate-700 transition-all disabled:opacity-50">
-                  JOIN ROOM
-                </button>
-             </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className={`min-h-screen bg-slate-950 text-slate-100 flex transition-colors duration-500 ${currentTeam.color === 'cyan' ? 'selection:bg-cyan-500' : 'selection:bg-red-500'}`}>
-      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} teamColor={currentTeam.color} onReset={() => setShowModeSelector(true)} />
+      <Sidebar 
+        activeTab={activeTab} 
+        setActiveTab={setActiveTab} 
+        teamColor={currentTeam.color} 
+        onReset={() => {
+            if(window.confirm("Reiniciar juego?")) {
+                localStorage.removeItem('f1_tycoon_game_v4');
+                window.location.reload();
+            }
+        }} 
+        hasNewOffers={currentTeam.sponsorOffers.length > 0}
+      />
       
       <main className="ml-64 flex-1 p-8 overflow-y-auto">
         {gameState.mode === 'online' && (
@@ -267,10 +252,6 @@ const App: React.FC = () => {
                <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">
                  {isMyTurn ? <span className="text-green-400">YOUR TURN</span> : <span className="text-yellow-500">WAITING FOR RIVAL...</span>}
                </p>
-            </div>
-            <div className="flex items-center gap-2">
-               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-               <span className="text-[10px] font-bold text-slate-500 uppercase">Synced</span>
             </div>
           </div>
         )}
@@ -295,10 +276,17 @@ const App: React.FC = () => {
               isVersus={gameState.mode !== 'single'}
             />
           )}
-          {/* Otros componentes: Market, Factory, etc. Se mantienen con la lógica de turno actual */}
           {activeTab === 'market' && <Market team={currentTeam} onHireDriver={d => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, funds: t.funds - d.cost, drivers: [...t.drivers, d], activeDriverIds: t.activeDriverIds.length < 2 ? [...t.activeDriverIds, d.id] : t.activeDriverIds} : t)}))} onSellDriver={id => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, funds: t.funds + (t.drivers.find(x => x.id === id)?.cost || 0)*0.5, drivers: t.drivers.filter(x => x.id !== id), activeDriverIds: t.activeDriverIds.filter(x => x !== id)} : t)}))} />}
           {activeTab === 'engineering' && <Engineering team={currentTeam} onHireEngineer={e => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, funds: t.funds - e.cost, engineers: [...t.engineers, e]} : t)}))} onFireEngineer={id => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, engineers: t.engineers.filter(x => x.id !== id)} : t)}))} />}
           {activeTab === 'factory' && <Factory team={currentTeam} onUpgrade={(p, c) => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, funds: t.funds - c, car: {...t.car, [p]: t.car[p] + 1}} : t)}))} />}
+          {activeTab === 'sponsors' && (
+            <Sponsors 
+              team={currentTeam} 
+              onAcceptSponsor={(s) => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, funds: t.funds + s.signingBonus, activeSponsorIds: [...t.activeSponsorIds, s.id], sponsorOffers: t.sponsorOffers.filter(o => o.id !== s.id)} : t)}))}
+              onRejectSponsor={(id) => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, sponsorOffers: t.sponsorOffers.filter(o => o.id !== id)} : t)}))}
+              onCancelActive={(id) => setGameState(prev => ({...prev, teams: prev.teams.map((t, i) => i === prev.currentPlayerIndex ? {...t, activeSponsorIds: t.activeSponsorIds.filter(x => x !== id)} : t)}))}
+            />
+          )}
           {activeTab === 'season' && (
              <div className="space-y-6">
                <h2 className="text-3xl font-f1 font-bold">Season Progress</h2>
@@ -338,6 +326,31 @@ const App: React.FC = () => {
           isHost={gameState.isHost || gameState.mode !== 'online'}
           roomCode={gameState.roomCode}
         />
+      )}
+
+      {showModeSelector && (
+          <div className="fixed inset-0 bg-slate-950 flex flex-col items-center justify-center p-8 z-[200]">
+             <div className="text-center space-y-4 mb-12">
+                <h1 className="text-7xl font-f1 font-bold text-red-600 italic tracking-tighter">F1 TYCOON</h1>
+                <p className="text-slate-500 font-bold uppercase tracking-widest">Select Management Mode</p>
+             </div>
+             <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-6xl w-full">
+                <ModeCard onClick={() => handleStartGame('single')} icon={<User size={40} />} title="SOLO" desc="Manager career vs AI." />
+                <ModeCard onClick={() => handleStartGame('versus')} icon={<Users size={40} />} title="VERSUS" desc="Two managers, local device." />
+                <ModeCard onClick={() => handleStartGame('online')} icon={<Globe size={40} />} title="ONLINE" desc="Competitive with friend online." accent="border-blue-500" />
+             </div>
+             {onlineMenu !== 'none' && (
+                 <div className="fixed inset-0 bg-slate-950/90 flex items-center justify-center z-[210]">
+                    <div className="bg-slate-900 p-8 rounded-3xl border border-slate-700 w-96 space-y-6">
+                        <button onClick={() => setOnlineMenu('none')} className="text-slate-500 flex items-center gap-2 hover:text-white transition-colors"><ArrowLeft size={16} /> Cancel</button>
+                        <h2 className="text-2xl font-f1 font-bold">Online Lobby</h2>
+                        <button onClick={handleCreateRoom} className="w-full py-4 bg-blue-600 rounded-xl font-bold">CREATE ROOM</button>
+                        <input type="text" placeholder="ROOM CODE" value={roomInput} onChange={e => setRoomInput(e.target.value)} className="w-full bg-slate-950 border border-slate-700 py-4 px-4 rounded-xl text-center uppercase font-f1" />
+                        <button onClick={handleJoinRoom} className="w-full py-4 bg-slate-800 rounded-xl font-bold">JOIN ROOM</button>
+                    </div>
+                 </div>
+             )}
+          </div>
       )}
     </div>
   );
